@@ -6,7 +6,14 @@ from tkinter import messagebox
 import threading
 
 from data_loader import cargar_datos, obtener_paradas_unicas
-from graph_manager import construir_grafo, calcular_ruta_dijkstra, calcular_ruta_con_tiempo
+from graph_manager import (
+    construir_grafo,
+    calcular_ruta_dijkstra,
+    calcular_ruta_con_tiempo,
+    calcular_ruta_economica_con_tiempo,
+    contar_transbordos,
+    calcular_costo_pasaje,
+)
 from map_generator import (
     generar_mapa,
     generar_mapa_grafo,
@@ -48,6 +55,7 @@ class AppTransmetro(ctk.CTk):
 
         self.grafo = None
         self.paradas_dict = {}   # {nombre_parada: stop_id}
+        self.modo_ruta = "rapida"  # "rapida" | "economica"
 
         self._construir_ui()
 
@@ -169,9 +177,31 @@ class AppTransmetro(ctk.CTk):
         )
         self.combo_destino.pack(fill="x", pady=(2, 10))
 
+        # ── Selector de modo de ruta ───────────────────────────────────────────
+        ctk.CTkLabel(card_ruta, text="Tipo de ruta", font=FUENTE_NORMAL,
+                     text_color=COLOR_SUBTEXTO).pack(anchor="w")
+
+        self.seg_modo = ctk.CTkSegmentedButton(
+            card_ruta,
+            values=["Mas Rapida", "Sin Costo Adicional"],
+            font=FUENTE_NORMAL,
+            height=34,
+            command=self._cambiar_modo_ruta,
+        )
+        self.seg_modo.set("Mas Rapida")
+        self.seg_modo.pack(fill="x", pady=(2, 10))
+
+        self.lbl_modo_info = ctk.CTkLabel(
+            card_ruta,
+            text="Sin limite de transbordos",
+            font=("Segoe UI", 10),
+            text_color=COLOR_SUBTEXTO,
+        )
+        self.lbl_modo_info.pack(anchor="w", pady=(0, 6))
+
         self.btn_calcular = ctk.CTkButton(
             card_ruta,
-            text="Calcular Ruta Óptima",
+            text="Calcular Ruta Optima",
             font=FUENTE_BOTON,
             fg_color=COLOR_PRIMARIO,
             hover_color="#005BB7",
@@ -293,18 +323,38 @@ class AppTransmetro(ctk.CTk):
         self.btn_ruta_direccion.configure(state=state)
         self.btn_ver_red.configure(state=state)
 
+    def _cambiar_modo_ruta(self, valor):
+        """Callback del CTkSegmentedButton para cambiar el modo de enrutamiento."""
+        if valor == "Sin Costo Adicional":
+            self.modo_ruta = "economica"
+            self.lbl_modo_info.configure(
+                text="Max 2 transbordos por pasaje ($3,700 COP)",
+                text_color="#007AFF",
+            )
+        else:
+            self.modo_ruta = "rapida"
+            self.lbl_modo_info.configure(
+                text="Sin limite de transbordos",
+                text_color=COLOR_SUBTEXTO,
+            )
+
     def _contar_transbordos(self, camino):
-        if len(camino) < 2:
+        """Delega al contador con interseccion de sets de rutas."""
+        if self.grafo is None or len(camino) < 2:
             return 0
-        transbordos = 0
-        ruta_actual = None
-        for i in range(len(camino) - 1):
-            data = self.grafo.get_edge_data(camino[i], camino[i + 1]) or {}
-            ruta = data.get("route")
-            if ruta_actual is not None and ruta != ruta_actual:
-                transbordos += 1
-            ruta_actual = ruta
-        return transbordos
+        return contar_transbordos(self.grafo, camino)
+
+    def _bloque_tarifa(self, transbordos: int) -> str:
+        """Genera el bloque de texto con la informacion tarifaria."""
+        pasajes, costo = calcular_costo_pasaje(transbordos)
+        lineas = [
+            "  COSTO DEL VIAJE",
+            f"    Transbordos    : {transbordos}",
+            f"    Pasajes a pagar: {pasajes}",
+            f"    Costo Total    : ${costo:,} COP",
+            f"    [1 pasaje cubre hasta 2 transbordos / 3 rutas diferentes]",
+        ]
+        return "\n".join(lineas)
 
     # ══════════════════════════════════════════════════════════════════════════
     # LÓGICA DE CARGA
@@ -356,12 +406,16 @@ class AppTransmetro(ctk.CTk):
         self._todos_los_botones("normal")
 
         self._escribir_resultado(
-            "✅ Grafo construido correctamente.\n\n"
-            "• Selecciona paradas y presiona «Calcular ruta» para usar Dijkstra.\n"
-            "• Ingresa direcciones de texto y presiona «Calcular ruta desde mis direcciones»\n"
-            "  para geocodificar y encontrar las paradas más cercanas.\n"
-            "• Presiona «Ver red completa en mapa» para explorar toda la red en Folium.\n"
-            "• Usa los botones de «Análisis de Red» para métricas del grafo."
+            "Grafo construido correctamente.\n\n"
+            "MODOS DE RUTA:\n"
+            "  'Mas Rapida'         - Dijkstra sin limite de transbordos.\n"
+            "  'Sin Costo Adicional'- Maximo 2 transbordos por pasaje ($3,700 COP).\n"
+            "                         Si necesitas mas transbordos, pagas un pasaje extra.\n\n"
+            "TARIFA: 1 pasaje cubre hasta 2 transbordos (3 rutas).\n"
+            "        Formula: pasajes = (transbordos // 3) + 1\n\n"
+            "• Selecciona paradas y presiona Calcular para ver la ruta y el costo.\n"
+            "• Usa Busqueda Inteligente para geocodificar direcciones de texto.\n"
+            "• Ver red completa en mapa abre Folium con toda la red."
         )
 
     def _mostrar_error_carga(self, error):
@@ -382,7 +436,7 @@ class AppTransmetro(ctk.CTk):
         nombre_destino = self.combo_destino.get()
 
         if nombre_origen == nombre_destino:
-            messagebox.showwarning("Selección inválida", "El origen y el destino no pueden ser iguales.")
+            messagebox.showwarning("Seleccion invalida", "El origen y el destino no pueden ser iguales.")
             return
 
         id_origen  = self.paradas_dict.get(nombre_origen)
@@ -392,48 +446,89 @@ class AppTransmetro(ctk.CTk):
             messagebox.showerror("Error", "No se encontraron los IDs de las paradas seleccionadas.")
             return
 
-        camino, distancia, tiempo = calcular_ruta_con_tiempo(self.grafo, id_origen, id_destino)
+        # ── Elegir algoritmo según el modo ────────────────────────────────────
+        modo_economico = (self.modo_ruta == "economica")
+
+        if modo_economico:
+            camino, distancia, tiempo = calcular_ruta_economica_con_tiempo(
+                self.grafo, id_origen, id_destino
+            )
+        else:
+            camino, distancia, tiempo = calcular_ruta_con_tiempo(
+                self.grafo, id_origen, id_destino
+            )
+
+        # ── Si el modo económico no encontró ruta, ofrecer alternativa ────────
+        if camino is None and modo_economico:
+            camino_alt, dist_alt, tiempo_alt = calcular_ruta_con_tiempo(
+                self.grafo, id_origen, id_destino
+            )
+            if camino_alt is not None:
+                t_alt = self._contar_transbordos(camino_alt)
+                p_alt, c_alt = calcular_costo_pasaje(t_alt)
+                self._escribir_resultado(
+                    "No se encontro ruta con maximo 2 transbordos.\n\n"
+                    "ALTERNATIVA (Mas Rapida, sin limite de transbordos):\n"
+                    f"  Paradas      : {len(camino_alt)}\n"
+                    f"  Distancia    : {dist_alt} km\n"
+                    f"  Tiempo est.  : {tiempo_alt} min\n"
+                    f"  Transbordos  : {t_alt}\n"
+                    f"  Costo        : ${c_alt:,} COP ({p_alt} pasaje(s))\n\n"
+                    "Cambia a 'Mas Rapida' para calcular y visualizar esta ruta."
+                )
+            else:
+                self._escribir_resultado(
+                    "No se encontro ruta (ni con limite ni sin limite de transbordos).\n\n"
+                    f"  Origen : {nombre_origen}\n"
+                    f"  Destino: {nombre_destino}"
+                )
+            return
 
         if camino is None:
             self._escribir_resultado(
-                f"❌ No se encontró ruta entre:\n\n"
-                f"  Origen:  {nombre_origen}\n"
+                "No se encontro ruta entre:\n\n"
+                f"  Origen : {nombre_origen}\n"
                 f"  Destino: {nombre_destino}\n\n"
-                f"Las paradas pueden no estar conectadas en el grafo."
+                "Las paradas pueden no estar conectadas en el grafo."
             )
             return
 
-        transbordos   = self._contar_transbordos(camino)
+        # ── Calcular métricas y tarifa ─────────────────────────────────────────
+        transbordos    = self._contar_transbordos(camino)
+        pasajes, costo = calcular_costo_pasaje(transbordos)
         nombres_camino = [self.grafo.nodes[sid].get("nombre", sid) for sid in camino]
 
+        etiqueta_modo = "Ruta Sin Costo Adicional (max 2 transbordos)" if modo_economico \
+                        else "Ruta Mas Rapida (Dijkstra, sin limite)"
+
         lineas = [
-            "🗺️  Ruta más corta · Dijkstra",
+            f"  {etiqueta_modo}",
             "",
             f"  Origen  : {nombre_origen}",
             f"  Destino : {nombre_destino}",
             "",
             f"  Paradas      : {len(camino)}",
             f"  Distancia    : {distancia} km",
-            f"  Tiempo est.  : {tiempo} min  (velocidad promedio 22 km/h)",
-            f"  Transbordos  : {transbordos}",
+            f"  Tiempo est.  : {tiempo} min  (22 km/h promedio)",
             "",
-            "─" * 52,
+            "  " + "-" * 50,
+            self._bloque_tarifa(transbordos),
+            "  " + "-" * 50,
             "",
         ]
         for i, nombre in enumerate(nombres_camino):
-            prefijo = "🟢" if i == 0 else ("🔴" if i == len(nombres_camino) - 1 else "  •")
+            prefijo = "[O]" if i == 0 else ("[D]" if i == len(nombres_camino) - 1 else "   ")
             lineas.append(f"  {prefijo}  {nombre}")
 
         self._escribir_resultado("\n".join(lineas))
 
+        # Consola
         print("\n" + "=" * 60)
-        print("RUTA MÁS CORTA (Dijkstra)")
-        print(f"Origen   : {nombre_origen}  |  Destino: {nombre_destino}")
-        print(f"Paradas  : {len(camino)}  |  Distancia: {distancia} km  |  Tiempo: {tiempo} min")
-        print(f"Transbordos: {transbordos}")
-        print("─" * 60)
-        for i, n in enumerate(nombres_camino):
-            print(f"  {i + 1}. {n}")
+        print(etiqueta_modo)
+        print(f"Origen  : {nombre_origen}")
+        print(f"Destino : {nombre_destino}")
+        print(f"Paradas : {len(camino)} | Dist: {distancia} km | Tiempo: {tiempo} min")
+        print(f"Transbordos: {transbordos} | Pasajes: {pasajes} | Costo: ${costo:,} COP")
         print("=" * 60)
 
         generar_mapa(self.grafo, camino)
@@ -498,50 +593,90 @@ class AppTransmetro(ctk.CTk):
                 ))
                 return
 
-            # 4. Dijkstra entre las dos paradas
-            camino, distancia, tiempo_bus = calcular_ruta_con_tiempo(self.grafo, stop_o, stop_d)
+            # 4. Elegir algoritmo según modo de ruta seleccionado
+            modo_economico = (self.modo_ruta == "economica")
+            if modo_economico:
+                camino, distancia, tiempo_bus = calcular_ruta_economica_con_tiempo(
+                    self.grafo, stop_o, stop_d
+                )
+            else:
+                camino, distancia, tiempo_bus = calcular_ruta_con_tiempo(
+                    self.grafo, stop_o, stop_d
+                )
+
+            # Si el modo económico no encontró ruta, mostrar alternativa
+            if camino is None and modo_economico:
+                camino_alt, dist_alt, tiempo_alt = calcular_ruta_con_tiempo(
+                    self.grafo, stop_o, stop_d
+                )
+                if camino_alt is not None:
+                    t_alt = contar_transbordos(self.grafo, camino_alt)
+                    p_alt, c_alt = calcular_costo_pasaje(t_alt)
+                    msg = (
+                        "No hay ruta con max 2 transbordos para estas direcciones.\n\n"
+                        "ALTERNATIVA (Mas Rapida):\n"
+                        f"  Paradas     : {len(camino_alt)}\n"
+                        f"  Distancia   : {dist_alt} km\n"
+                        f"  Tiempo bus  : {tiempo_alt} min\n"
+                        f"  Transbordos : {t_alt}\n"
+                        f"  Costo       : ${c_alt:,} COP ({p_alt} pasaje(s))\n\n"
+                        "Cambia a 'Mas Rapida' para calcular esta ruta."
+                    )
+                else:
+                    msg = (
+                        "No se encontro ruta entre las paradas mas cercanas.\n\n"
+                        f"  Origen : {nombre_o}\n"
+                        f"  Destino: {nombre_d}"
+                    )
+                self.after(0, lambda m=msg: self._escribir_resultado(m))
+                return
 
             if camino is None:
                 self.after(0, lambda: self._escribir_resultado(
-                    f"❌ No se encontró ruta entre las paradas más cercanas:\n\n"
+                    "No se encontro ruta entre las paradas mas cercanas:\n\n"
                     f"  Origen  : {nombre_o}\n"
                     f"  Destino : {nombre_d}\n\n"
-                    f"Las paradas pueden no estar conectadas en el componente principal."
+                    "Las paradas pueden no estar conectadas en el componente principal."
                 ))
                 return
 
-            transbordos    = self._contar_transbordos(camino)
+            transbordos    = contar_transbordos(self.grafo, camino)
+            pasajes, costo = calcular_costo_pasaje(transbordos)
             nombres_camino = [self.grafo.nodes[sid].get("nombre", sid) for sid in camino]
 
             # Tiempo de caminata: velocidad peatonal ~5 km/h = 0.0833 km/min
             walk_o = round(dist_o / 0.0833, 1)
             walk_d = round(dist_d / 0.0833, 1)
 
+            etiqueta_modo = "Sin Costo Adicional (max 2 transbordos)" if modo_economico \
+                            else "Mas Rapida (sin limite)"
+
             lineas = [
-                "📍  Ruta desde tus direcciones · Geocodificación + Dijkstra",
+                f"  Ruta por Direccion · {etiqueta_modo}",
                 "",
-                f"  ── Origen ingresado",
-                f"     «{texto_o}»",
-                f"     Parada más cercana : {nombre_o}",
+                "  -- Origen",
+                f"     {texto_o}",
+                f"     Parada mas cercana : {nombre_o}",
                 f"     Distancia a pie    : {dist_o * 1000:.0f} m  (~{walk_o} min caminando)",
                 "",
-                f"  ── Destino ingresado",
-                f"     «{texto_d}»",
-                f"     Parada más cercana : {nombre_d}",
+                "  -- Destino",
+                f"     {texto_d}",
+                f"     Parada mas cercana : {nombre_d}",
                 f"     Distancia a pie    : {dist_d * 1000:.0f} m  (~{walk_d} min caminando)",
                 "",
-                f"  ── Ruta en bus (Dijkstra)",
+                "  -- Ruta en bus",
                 f"     Paradas     : {len(camino)}",
                 f"     Distancia   : {distancia} km",
-                f"     Tiempo bus  : {tiempo_bus} min  (velocidad promedio 22 km/h)",
-                f"     Transbordos : {transbordos}",
-                f"     Tiempo total est. : {round(walk_o + tiempo_bus + walk_d, 1)} min",
+                f"     Tiempo bus  : {tiempo_bus} min  (22 km/h promedio)",
+                f"     Tiempo total: ~{round(walk_o + tiempo_bus + walk_d, 1)} min",
                 "",
-                "─" * 52,
+                "  " + "-" * 50,
+                self._bloque_tarifa(transbordos),
+                "  " + "-" * 50,
                 "",
             ]
             for i, nombre in enumerate(nombres_camino):
-                prefijo = "🟢" if i == 0 else ("🔴" if i == len(nombres_camino) - 1 else "  •")
+                prefijo = "[O]" if i == 0 else ("[D]" if i == len(nombres_camino) - 1 else "   ")
                 lineas.append(f"  {prefijo}  {nombre}")
 
             resultado_texto = "\n".join(lineas)
@@ -572,7 +707,7 @@ class AppTransmetro(ctk.CTk):
         finally:
             self.after(0, lambda: self._todos_los_botones("normal"))
             self.after(0, lambda: self.btn_ruta_direccion.configure(
-                text="  Calcular ruta desde mis direcciones"))
+                text="Buscar Ruta por Direccion"))
             self.after(0, lambda: self.lbl_estado.configure(
                 text=f"✓ Dataset cargado — {len(self.paradas_dict)} paradas",
                 text_color=COLOR_EXITO,
