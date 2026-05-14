@@ -91,6 +91,52 @@ def geocodificar_direccion(direccion_texto: str):
         return None, None
 
 
+# ── AUTOCOMPLETADO DE DIRECCIONES ────────────────────────────────────────────
+
+def get_address_suggestions(query: str) -> list:
+    """
+    Devuelve hasta 5 sugerencias de direcciones en Barranquilla.
+
+    Utiliza Nominatim (OpenStreetMap) con:
+      - viewbox  : bounding-box del área metropolitana de Barranquilla.
+      - bounded=1: restringe los resultados al viewbox (no salen de la ciudad).
+      - limit=5  : máximo de candidatos retornados.
+
+    Añade automáticamente ", Barranquilla, Colombia" al query si no está presente.
+    Retorna [] ante cualquier error (timeout, red, etc.) para no bloquear la UI.
+    """
+    try:
+        from geopy.geocoders import Nominatim
+        from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
+
+        texto = query.strip()
+        if len(texto) < 3:
+            return []
+
+        if "barranquilla" not in texto.lower() and "colombia" not in texto.lower():
+            texto_busqueda = f"{texto}, Barranquilla, Colombia"
+        else:
+            texto_busqueda = texto
+
+        geolocator = Nominatim(user_agent="transmetro_baq_autocomplete", timeout=5)
+
+        results = geolocator.geocode(
+            texto_busqueda,
+            exactly_one=False,
+            limit=5,
+            viewbox=[(11.03, -74.85), (10.90, -74.70)],
+            bounded=True,
+        )
+
+        if not results:
+            return []
+
+        return [r.address for r in results]
+
+    except (Exception,):          # GeocoderTimedOut, GeocoderUnavailable, network, etc.
+        return []
+
+
 # ── MAPA PRINCIPAL ────────────────────────────────────────────────────────────
 
 def generar_mapa_grafo(

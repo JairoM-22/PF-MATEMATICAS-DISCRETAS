@@ -2,15 +2,15 @@
 # Interfaz gráfica moderna con CustomTkinter para visualizar el grafo de Transmetro.
 
 import customtkinter as ctk
+import tkinter as tk
 from tkinter import messagebox
 import threading
+from collections import defaultdict
 
 from data_loader import cargar_datos, obtener_paradas_unicas
 from graph_manager import (
     construir_grafo,
-    calcular_ruta_dijkstra,
-    calcular_ruta_con_tiempo,
-    calcular_ruta_economica_con_tiempo,
+    buscar_ruta_optima,
     contar_transbordos,
     calcular_costo_pasaje,
 )
@@ -19,6 +19,7 @@ from map_generator import (
     generar_mapa_grafo,
     geocodificar_direccion,
     parada_mas_cercana,
+    get_address_suggestions,
 )
 import graph_analyzer
 import route_catalog
@@ -44,6 +45,141 @@ FUENTE_BOTON     = ("Segoe UI", 12, "bold")
 FUENTE_MONO      = ("Consolas", 11)
 
 
+# ── DROPDOWN DE AUTOCOMPLETADO ────────────────────────────────────────────────
+
+class _AutocompleteDropdown:
+    """
+    Ventana flotante de sugerencias de autocompletado para campos de dirección.
+
+    Se posiciona automáticamente justo debajo del Entry de referencia usando
+    coordenadas de pantalla (winfo_rootx/y), funciona aunque el Entry esté
+    dentro de un CTkScrollableFrame u otros contenedores anidados.
+
+    Estética Apple Moderno:
+      - Fondo blanco con borde gris #C7C7CC de 1px (igual que los separadores).
+      - Hover: fondo #F2F2F7 (System Gray 6).
+      - Ícono ⊙ en azul Apple #007AFF.
+      - Separador fino #F2F2F7 entre items.
+    """
+
+    _ROW_H = 38   # Altura fija de cada fila (px)
+    _MAX_N = 5    # Máximo de sugerencias visibles
+
+    def __init__(self, root, entry_widget, on_select):
+        self._root      = root
+        self._entry     = entry_widget
+        self._on_select = on_select
+        self._win       = None   # tk.Toplevel
+        self._body      = None   # Frame interior blanco
+        self._current   = []     # Lista de direcciones completas actuales
+
+    # ── API pública ──────────────────────────────────────────────────────────
+
+    def update(self, suggestions: list):
+        """Muestra o actualiza el dropdown con las nuevas sugerencias."""
+        if not suggestions:
+            self.hide()
+            return
+        self._current = suggestions
+        self._ensure_win()
+        self._build_items(suggestions)
+        self._reposition()
+        self._win.deiconify()
+        self._win.lift()
+
+    def hide(self):
+        """Oculta el dropdown (sin destruirlo, para reutilizarlo)."""
+        if self._win and self._win.winfo_exists():
+            self._win.withdraw()
+
+    def visible(self) -> bool:
+        return (
+            self._win is not None
+            and self._win.winfo_exists()
+            and self._win.state() != "withdrawn"
+        )
+
+    # ── Internos ─────────────────────────────────────────────────────────────
+
+    def _ensure_win(self):
+        """Crea el Toplevel si no existe o fue destruido."""
+        if self._win and self._win.winfo_exists():
+            return
+
+        self._win = tk.Toplevel(self._root)
+        self._win.overrideredirect(True)       # Sin barra de título ni botones
+        self._win.attributes("-topmost", True) # Siempre por encima
+
+        # Marco exterior = borde 1px color #C7C7CC
+        border = tk.Frame(self._win, bg="#C7C7CC")
+        border.pack(fill="both", expand=True)
+
+        # Área interior blanca con 1px de separación del borde
+        self._body = tk.Frame(border, bg="#FFFFFF")
+        self._body.pack(fill="both", expand=True, padx=1, pady=1)
+
+    def _build_items(self, suggestions: list):
+        """Elimina items anteriores y construye los nuevos."""
+        for child in self._body.winfo_children():
+            child.destroy()
+
+        for idx, addr in enumerate(suggestions):
+            is_last  = (idx == len(suggestions) - 1)
+            display  = (addr[:62] + "…") if len(addr) > 65 else addr
+            full_addr = addr   # captura explícita para el closure
+
+            # ── Fila ──────────────────────────────────────────────────────
+            row = tk.Frame(self._body, bg="#FFFFFF",
+                           height=self._ROW_H, cursor="hand2")
+            row.pack(fill="x")
+            row.pack_propagate(False)
+
+            ico = tk.Label(row, text=" ⊙ ", bg="#FFFFFF",
+                           fg="#007AFF", font=("Segoe UI", 10),
+                           cursor="hand2")
+            ico.pack(side="left")
+
+            lbl = tk.Label(row, text=display, bg="#FFFFFF",
+                           fg="#1C1C1E", font=("Segoe UI", 10),
+                           anchor="w", cursor="hand2")
+            lbl.pack(side="left", fill="both", expand=True, padx=(0, 12))
+
+            # ── Separador fino entre filas (no en la última) ───────────────
+            if not is_last:
+                tk.Frame(self._body, bg="#F2F2F7",
+                         height=1).pack(fill="x", padx=12)
+
+            # ── Hover y click ──────────────────────────────────────────────
+            def _enter(e, r=row, i=ico, l=lbl):
+                for w in (r, i, l):
+                    w.configure(bg="#F2F2F7")
+
+            def _leave(e, r=row, i=ico, l=lbl):
+                for w in (r, i, l):
+                    w.configure(bg="#FFFFFF")
+
+            def _click(e, a=full_addr):
+                self._on_select(a)
+                self.hide()
+
+            for w in (row, ico, lbl):
+                w.bind("<Enter>", _enter)
+                w.bind("<Leave>", _leave)
+                w.bind("<Button-1>", _click)
+
+    def _reposition(self):
+        """Posiciona el Toplevel justo debajo del Entry en coordenadas de pantalla."""
+        self._entry.update_idletasks()
+        x  = self._entry.winfo_rootx()
+        y  = self._entry.winfo_rooty() + self._entry.winfo_height() + 3
+        ew = self._entry.winfo_width()
+        n  = min(len(self._current), self._MAX_N)
+        h  = n * self._ROW_H + 2   # +2 por padding del borde
+        self._win.geometry(f"{ew}x{h}+{x}+{y}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 class AppTransmetro(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -54,10 +190,11 @@ class AppTransmetro(ctk.CTk):
         self.configure(fg_color=COLOR_BG)
 
         self.grafo = None
-        self.paradas_dict = {}   # {nombre_parada: stop_id}
-        self.modo_ruta = "rapida"  # "rapida" | "economica"
+        self.paradas_dict = {}   # {nombre_parada: [stop_id, ...]}  (lista por si hay varias plataformas)
+        self.modo_ruta = "rapido"  # "rapido" | "ahorro"
 
         self._construir_ui()
+        self._setup_autocomplete()   # Debe ir después de _construir_ui (necesita los Entry)
 
         # Carga automática del dataset al iniciar (400 ms de gracia para que la UI renderice)
         self.after(400, self._hilo_cargar)
@@ -326,33 +463,32 @@ class AppTransmetro(ctk.CTk):
     def _cambiar_modo_ruta(self, valor):
         """Callback del CTkSegmentedButton para cambiar el modo de enrutamiento."""
         if valor == "Sin Costo Adicional":
-            self.modo_ruta = "economica"
+            self.modo_ruta = "ahorro"
             self.lbl_modo_info.configure(
-                text="Max 2 transbordos por pasaje ($3,700 COP)",
-                text_color="#007AFF",
+                text="Minimiza pasajes. 1 pasaje = hasta 3 buses ($3,700 COP)",
+                text_color=COLOR_PRIMARIO,
             )
         else:
-            self.modo_ruta = "rapida"
+            self.modo_ruta = "rapido"
             self.lbl_modo_info.configure(
-                text="Sin limite de transbordos",
+                text="Minimiza distancia/tiempo. Puede pagar mas pasajes.",
                 text_color=COLOR_SUBTEXTO,
             )
 
-    def _contar_transbordos(self, camino):
-        """Delega al contador con interseccion de sets de rutas."""
-        if self.grafo is None or len(camino) < 2:
-            return 0
-        return contar_transbordos(self.grafo, camino)
-
-    def _bloque_tarifa(self, transbordos: int) -> str:
-        """Genera el bloque de texto con la informacion tarifaria."""
-        pasajes, costo = calcular_costo_pasaje(transbordos)
+    def _bloque_tarifa(self, buses_tomados: int) -> str:
+        """
+        Genera el bloque de texto con la informacion tarifaria real de Transmetro.
+        Recibe 'buses_tomados' (cantidad de buses distintos abordados en el viaje).
+        """
+        pasajes, costo = calcular_costo_pasaje(buses_tomados)
+        transbordos = max(0, buses_tomados - 1)
         lineas = [
             "  COSTO DEL VIAJE",
+            f"    Buses tomados  : {buses_tomados}",
             f"    Transbordos    : {transbordos}",
             f"    Pasajes a pagar: {pasajes}",
             f"    Costo Total    : ${costo:,} COP",
-            f"    [1 pasaje cubre hasta 2 transbordos / 3 rutas diferentes]",
+            f"    [1 pasaje cubre 1, 2 o 3 buses — 2 transbordos gratis]",
         ]
         return "\n".join(lineas)
 
@@ -374,13 +510,13 @@ class AppTransmetro(ctk.CTk):
             self.grafo = construir_grafo(stops, stop_times, trips)
 
             paradas_raw = obtener_paradas_unicas(stops)
-            paradas_en_grafo = {
-                nombre: sid
-                for sid, nombre in paradas_raw.items()
-                if sid in self.grafo.nodes
-            }
-            nombres_ordenados = sorted(paradas_en_grafo.keys())
-            self.paradas_dict = paradas_en_grafo
+            # Agrupar stop_ids por nombre: un nombre puede tener varias plataformas
+            paradas_por_nombre = defaultdict(list)
+            for sid, nombre in paradas_raw.items():
+                if sid in self.grafo.nodes:
+                    paradas_por_nombre[nombre].append(sid)
+            nombres_ordenados = sorted(paradas_por_nombre.keys())
+            self.paradas_dict = dict(paradas_por_nombre)
 
             self.after(0, lambda: self._actualizar_ui_tras_carga(nombres_ordenados))
 
@@ -393,8 +529,11 @@ class AppTransmetro(ctk.CTk):
 
         self.lbl_nodos.configure(text=f"Nodos: {n_nodos:,}")
         self.lbl_aristas.configure(text=f"  ·  Aristas: {n_aristas:,}")
+        n_estaciones = len(nombres)
+        n_plataformas = sum(len(v) for v in self.paradas_dict.values())
         self.lbl_estado.configure(
-            text=f"✓ Dataset cargado — {len(nombres)} paradas", text_color=COLOR_EXITO
+            text=f"✓ Dataset cargado — {n_estaciones} estaciones / {n_plataformas} plataformas",
+            text_color=COLOR_EXITO,
         )
 
         self.combo_origen.configure(values=nombres, state="normal")
@@ -408,11 +547,15 @@ class AppTransmetro(ctk.CTk):
         self._escribir_resultado(
             "Grafo construido correctamente.\n\n"
             "MODOS DE RUTA:\n"
-            "  'Mas Rapida'         - Dijkstra sin limite de transbordos.\n"
-            "  'Sin Costo Adicional'- Maximo 2 transbordos por pasaje ($3,700 COP).\n"
-            "                         Si necesitas mas transbordos, pagas un pasaje extra.\n\n"
-            "TARIFA: 1 pasaje cubre hasta 2 transbordos (3 rutas).\n"
-            "        Formula: pasajes = (transbordos // 3) + 1\n\n"
+            "  'Mas Rapida'         - Minimiza distancia/tiempo. Dijkstra clasico.\n"
+            "                         Puede usar mas pasajes si la ruta es mas corta.\n\n"
+            "  'Sin Costo Adicional'- Minimiza pasajes pagados.\n"
+            "                         1 pasaje cubre 1, 2 o 3 buses ($3,700 COP).\n"
+            "                         Al tomar el 4to bus se paga un 2do pasaje.\n\n"
+            "TARIFA REAL TRANSMETRO:\n"
+            "  1 pasaje  = hasta 3 buses (0, 1 o 2 transbordos) = $3,700 COP\n"
+            "  2 pasajes = hasta 6 buses (3, 4 o 5 transbordos) = $7,400 COP\n"
+            "  Formula   : pasajes = ceil(buses_tomados / 3)\n\n"
             "• Selecciona paradas y presiona Calcular para ver la ruta y el costo.\n"
             "• Usa Busqueda Inteligente para geocodificar direcciones de texto.\n"
             "• Ver red completa en mapa abre Folium con toda la red."
@@ -439,50 +582,17 @@ class AppTransmetro(ctk.CTk):
             messagebox.showwarning("Seleccion invalida", "El origen y el destino no pueden ser iguales.")
             return
 
-        id_origen  = self.paradas_dict.get(nombre_origen)
-        id_destino = self.paradas_dict.get(nombre_destino)
+        ids_origen  = self.paradas_dict.get(nombre_origen, [])
+        ids_destino = self.paradas_dict.get(nombre_destino, [])
 
-        if not id_origen or not id_destino:
+        if not ids_origen or not ids_destino:
             messagebox.showerror("Error", "No se encontraron los IDs de las paradas seleccionadas.")
             return
 
-        # ── Elegir algoritmo según el modo ────────────────────────────────────
-        modo_economico = (self.modo_ruta == "economica")
-
-        if modo_economico:
-            camino, distancia, tiempo = calcular_ruta_economica_con_tiempo(
-                self.grafo, id_origen, id_destino
-            )
-        else:
-            camino, distancia, tiempo = calcular_ruta_con_tiempo(
-                self.grafo, id_origen, id_destino
-            )
-
-        # ── Si el modo económico no encontró ruta, ofrecer alternativa ────────
-        if camino is None and modo_economico:
-            camino_alt, dist_alt, tiempo_alt = calcular_ruta_con_tiempo(
-                self.grafo, id_origen, id_destino
-            )
-            if camino_alt is not None:
-                t_alt = self._contar_transbordos(camino_alt)
-                p_alt, c_alt = calcular_costo_pasaje(t_alt)
-                self._escribir_resultado(
-                    "No se encontro ruta con maximo 2 transbordos.\n\n"
-                    "ALTERNATIVA (Mas Rapida, sin limite de transbordos):\n"
-                    f"  Paradas      : {len(camino_alt)}\n"
-                    f"  Distancia    : {dist_alt} km\n"
-                    f"  Tiempo est.  : {tiempo_alt} min\n"
-                    f"  Transbordos  : {t_alt}\n"
-                    f"  Costo        : ${c_alt:,} COP ({p_alt} pasaje(s))\n\n"
-                    "Cambia a 'Mas Rapida' para calcular y visualizar esta ruta."
-                )
-            else:
-                self._escribir_resultado(
-                    "No se encontro ruta (ni con limite ni sin limite de transbordos).\n\n"
-                    f"  Origen : {nombre_origen}\n"
-                    f"  Destino: {nombre_destino}"
-                )
-            return
+        # ── Buscar ruta con la función maestra ───────────────────────────────
+        camino, distancia, buses_tomados = buscar_ruta_optima(
+            self.grafo, ids_origen, ids_destino, modo=self.modo_ruta
+        )
 
         if camino is None:
             self._escribir_resultado(
@@ -493,13 +603,17 @@ class AppTransmetro(ctk.CTk):
             )
             return
 
-        # ── Calcular métricas y tarifa ─────────────────────────────────────────
-        transbordos    = self._contar_transbordos(camino)
-        pasajes, costo = calcular_costo_pasaje(transbordos)
+        # ── Calcular métricas y tarifa ────────────────────────────────────────
+        tiempo         = round((distancia / 22) * 60, 1)
+        transbordos    = max(0, buses_tomados - 1)
+        pasajes, costo = calcular_costo_pasaje(buses_tomados)
         nombres_camino = [self.grafo.nodes[sid].get("nombre", sid) for sid in camino]
 
-        etiqueta_modo = "Ruta Sin Costo Adicional (max 2 transbordos)" if modo_economico \
-                        else "Ruta Mas Rapida (Dijkstra, sin limite)"
+        etiqueta_modo = (
+            "Modo Ahorro — Minimo costo tarifario"
+            if self.modo_ruta == "ahorro"
+            else "Modo Rapido — Minima distancia"
+        )
 
         lineas = [
             f"  {etiqueta_modo}",
@@ -512,7 +626,7 @@ class AppTransmetro(ctk.CTk):
             f"  Tiempo est.  : {tiempo} min  (22 km/h promedio)",
             "",
             "  " + "-" * 50,
-            self._bloque_tarifa(transbordos),
+            self._bloque_tarifa(buses_tomados),
             "  " + "-" * 50,
             "",
         ]
@@ -525,10 +639,9 @@ class AppTransmetro(ctk.CTk):
         # Consola
         print("\n" + "=" * 60)
         print(etiqueta_modo)
-        print(f"Origen  : {nombre_origen}")
-        print(f"Destino : {nombre_destino}")
+        print(f"Origen  : {nombre_origen}  |  Destino: {nombre_destino}")
         print(f"Paradas : {len(camino)} | Dist: {distancia} km | Tiempo: {tiempo} min")
-        print(f"Transbordos: {transbordos} | Pasajes: {pasajes} | Costo: ${costo:,} COP")
+        print(f"Buses: {buses_tomados} | Transbordos: {transbordos} | Pasajes: {pasajes} | ${costo:,} COP")
         print("=" * 60)
 
         generar_mapa(self.grafo, camino)
@@ -593,63 +706,34 @@ class AppTransmetro(ctk.CTk):
                 ))
                 return
 
-            # 4. Elegir algoritmo según modo de ruta seleccionado
-            modo_economico = (self.modo_ruta == "economica")
-            if modo_economico:
-                camino, distancia, tiempo_bus = calcular_ruta_economica_con_tiempo(
-                    self.grafo, stop_o, stop_d
-                )
-            else:
-                camino, distancia, tiempo_bus = calcular_ruta_con_tiempo(
-                    self.grafo, stop_o, stop_d
-                )
-
-            # Si el modo económico no encontró ruta, mostrar alternativa
-            if camino is None and modo_economico:
-                camino_alt, dist_alt, tiempo_alt = calcular_ruta_con_tiempo(
-                    self.grafo, stop_o, stop_d
-                )
-                if camino_alt is not None:
-                    t_alt = contar_transbordos(self.grafo, camino_alt)
-                    p_alt, c_alt = calcular_costo_pasaje(t_alt)
-                    msg = (
-                        "No hay ruta con max 2 transbordos para estas direcciones.\n\n"
-                        "ALTERNATIVA (Mas Rapida):\n"
-                        f"  Paradas     : {len(camino_alt)}\n"
-                        f"  Distancia   : {dist_alt} km\n"
-                        f"  Tiempo bus  : {tiempo_alt} min\n"
-                        f"  Transbordos : {t_alt}\n"
-                        f"  Costo       : ${c_alt:,} COP ({p_alt} pasaje(s))\n\n"
-                        "Cambia a 'Mas Rapida' para calcular esta ruta."
-                    )
-                else:
-                    msg = (
-                        "No se encontro ruta entre las paradas mas cercanas.\n\n"
-                        f"  Origen : {nombre_o}\n"
-                        f"  Destino: {nombre_d}"
-                    )
-                self.after(0, lambda m=msg: self._escribir_resultado(m))
-                return
+            # 4. Buscar ruta con la función maestra (respeta el modo seleccionado)
+            camino, distancia, buses_tomados = buscar_ruta_optima(
+                self.grafo, stop_o, stop_d, modo=self.modo_ruta
+            )
 
             if camino is None:
                 self.after(0, lambda: self._escribir_resultado(
                     "No se encontro ruta entre las paradas mas cercanas:\n\n"
                     f"  Origen  : {nombre_o}\n"
                     f"  Destino : {nombre_d}\n\n"
-                    "Las paradas pueden no estar conectadas en el componente principal."
+                    "Las paradas pueden no estar conectadas en el grafo."
                 ))
                 return
 
-            transbordos    = contar_transbordos(self.grafo, camino)
-            pasajes, costo = calcular_costo_pasaje(transbordos)
+            tiempo_bus     = round((distancia / 22) * 60, 1)
+            transbordos    = max(0, buses_tomados - 1)
+            pasajes, costo = calcular_costo_pasaje(buses_tomados)
             nombres_camino = [self.grafo.nodes[sid].get("nombre", sid) for sid in camino]
 
             # Tiempo de caminata: velocidad peatonal ~5 km/h = 0.0833 km/min
             walk_o = round(dist_o / 0.0833, 1)
             walk_d = round(dist_d / 0.0833, 1)
 
-            etiqueta_modo = "Sin Costo Adicional (max 2 transbordos)" if modo_economico \
-                            else "Mas Rapida (sin limite)"
+            etiqueta_modo = (
+                "Modo Ahorro — Minimo costo tarifario"
+                if self.modo_ruta == "ahorro"
+                else "Modo Rapido — Minima distancia"
+            )
 
             lineas = [
                 f"  Ruta por Direccion · {etiqueta_modo}",
@@ -671,7 +755,7 @@ class AppTransmetro(ctk.CTk):
                 f"     Tiempo total: ~{round(walk_o + tiempo_bus + walk_d, 1)} min",
                 "",
                 "  " + "-" * 50,
-                self._bloque_tarifa(transbordos),
+                self._bloque_tarifa(buses_tomados),
                 "  " + "-" * 50,
                 "",
             ]
@@ -709,9 +793,161 @@ class AppTransmetro(ctk.CTk):
             self.after(0, lambda: self.btn_ruta_direccion.configure(
                 text="Buscar Ruta por Direccion"))
             self.after(0, lambda: self.lbl_estado.configure(
-                text=f"✓ Dataset cargado — {len(self.paradas_dict)} paradas",
+                text=f"✓ Dataset cargado — {len(self.paradas_dict)} estaciones",
                 text_color=COLOR_EXITO,
             ))
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # AUTOCOMPLETADO DE DIRECCIONES
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _setup_autocomplete(self):
+        """
+        Inicializa el sistema de autocompletado para los campos de Búsqueda
+        Inteligente.
+
+        - Crea un _AutocompleteDropdown por cada Entry de dirección.
+        - Enlaza <KeyRelease> con debounce de 500ms para no saturar Nominatim.
+        - Enlaza <FocusOut> con retardo de 250ms para que el click del dropdown
+          pueda registrarse antes de que se oculte la ventana.
+        - Enlaza <Configure> en la ventana principal para cerrar dropdowns si el
+          usuario mueve o redimensiona la ventana.
+        """
+        self._debounce_ids = {"origen": None, "destino": None}
+
+        self._dropdowns = {
+            "origen": _AutocompleteDropdown(
+                self,
+                self.entry_direccion_origen,
+                on_select=lambda addr: self._select_address(addr, "origen"),
+            ),
+            "destino": _AutocompleteDropdown(
+                self,
+                self.entry_direccion_destino,
+                on_select=lambda addr: self._select_address(addr, "destino"),
+            ),
+        }
+
+        # KeyRelease → debounce
+        self.entry_direccion_origen.bind(
+            "<KeyRelease>", lambda e: self._on_address_key(e, "origen")
+        )
+        self.entry_direccion_destino.bind(
+            "<KeyRelease>", lambda e: self._on_address_key(e, "destino")
+        )
+
+        # FocusOut → ocultar con retardo para que el click del dropdown registre
+        self.entry_direccion_origen.bind(
+            "<FocusOut>",
+            lambda e: self.after(250, self._dropdowns["origen"].hide),
+        )
+        self.entry_direccion_destino.bind(
+            "<FocusOut>",
+            lambda e: self.after(250, self._dropdowns["destino"].hide),
+        )
+
+        # Configure en la ventana principal → cerrar dropdowns al mover/redimensionar
+        self.bind("<Configure>", self._on_win_configure)
+
+    def _on_win_configure(self, event):
+        """Cierra todos los dropdowns si la ventana principal cambia de tamaño o posición."""
+        if event.widget is self and hasattr(self, "_dropdowns"):
+            for d in self._dropdowns.values():
+                d.hide()
+
+    def _on_address_key(self, event, campo: str):
+        """
+        Handler de <KeyRelease> para los campos de dirección.
+        Implementa debounce de 500ms: cancela el timer anterior y programa uno
+        nuevo en cada pulsación, de modo que la API solo se consulta cuando el
+        usuario se detiene medio segundo.
+        """
+        # Teclas que no deben disparar búsqueda nueva
+        _SKIP = {
+            "Escape", "Return", "KP_Enter", "Tab",
+            "Left", "Right", "Home", "End", "Prior", "Next",
+            "Up", "Down",
+            "Shift_L", "Shift_R", "Control_L", "Control_R",
+            "Alt_L", "Alt_R", "Meta_L", "Meta_R",
+            "Caps_Lock", "Num_Lock", "Scroll_Lock",
+        }
+
+        if event.keysym == "Escape":
+            self._dropdowns[campo].hide()
+            return
+        if event.keysym in _SKIP:
+            return
+
+        # Cancelar debounce previo
+        if self._debounce_ids[campo]:
+            self.after_cancel(self._debounce_ids[campo])
+            self._debounce_ids[campo] = None
+
+        entry = (
+            self.entry_direccion_origen
+            if campo == "origen"
+            else self.entry_direccion_destino
+        )
+        query = entry.get().strip()
+
+        if len(query) < 3:
+            self._dropdowns[campo].hide()
+            return
+
+        # Programar búsqueda en 500ms
+        self._debounce_ids[campo] = self.after(
+            500,
+            lambda q=query, c=campo: self._dispatch_suggestions(q, c),
+        )
+
+    def _dispatch_suggestions(self, query: str, campo: str):
+        """
+        Lanza un hilo daemon para consultar Nominatim sin bloquear la UI.
+        Cuando el hilo termina, agenda _apply_suggestions en el hilo principal
+        mediante self.after(0, ...).
+        """
+        def _worker():
+            sugerencias = get_address_suggestions(query)
+            self.after(
+                0,
+                lambda s=sugerencias, q=query, c=campo:
+                    self._apply_suggestions(s, q, c),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_suggestions(self, suggestions: list, sent_query: str, campo: str):
+        """
+        Muestra las sugerencias recibidas en el dropdown correspondiente.
+
+        Si el texto actual del Entry ya difiere del query que se envió (el usuario
+        siguió escribiendo mientras esperaba la respuesta), descarta el resultado
+        para evitar mostrar sugerencias obsoletas.
+        """
+        entry = (
+            self.entry_direccion_origen
+            if campo == "origen"
+            else self.entry_direccion_destino
+        )
+        current = entry.get().strip()
+        # Descartar respuestas tardías (el query ya cambió)
+        if current.lower() != sent_query.lower():
+            return
+        self._dropdowns[campo].update(suggestions)
+
+    def _select_address(self, address: str, campo: str):
+        """
+        Rellena el Entry con la dirección seleccionada del dropdown y
+        devuelve el foco al campo para que el usuario pueda editarla si quiere.
+        """
+        entry = (
+            self.entry_direccion_origen
+            if campo == "origen"
+            else self.entry_direccion_destino
+        )
+        entry.delete(0, "end")
+        entry.insert(0, address)
+        entry.focus_set()
 
     # ══════════════════════════════════════════════════════════════════════════
     # VER RED COMPLETA EN MAPA
@@ -843,7 +1079,8 @@ class AppTransmetro(ctk.CTk):
             return
 
         nombre  = self.combo_origen.get()
-        stop_id = self.paradas_dict.get(nombre)
+        ids     = self.paradas_dict.get(nombre, [])
+        stop_id = ids[0] if ids else None
 
         if not stop_id:
             messagebox.showerror("Error", "No se encontró el ID de la parada seleccionada.")
