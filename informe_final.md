@@ -126,6 +126,15 @@ F(P) = \alpha \cdot T(P) + \sum_{e \in P} W(e)
 \]
 Para garantizar que la disminución monetaria siempre prime sobre la distancia física, elegimos una constante $\alpha = 10,000$ (una distancia ficticia inalcanzable en la red). De esta manera, cualquier camino que requiera 1 pasaje tendrá un costo muy inferior a uno que requiera 2, resolviendo el problema mediante una variante del algoritmo de Dijkstra.
 
+\subsection{Análisis Estructural y Métricas de Centralidad}
+Además del enrutamiento, el modelo permite evaluar la robustez y topología de la red mediante métricas de centralidad:
+\begin{itemize}
+    \item \textbf{Centralidad de Grado (Degree Centrality):} Mide la cantidad de conexiones directas de una estación.
+    \item \textbf{Centralidad de Intermediación (Betweenness Centrality):} Cuantifica la frecuencia con la que un nodo actúa como puente en los caminos más cortos entre otros pares de nodos. Identifica cuellos de botella.
+    \item \textbf{Centralidad de Cercanía (Closeness Centrality):} Evalúa qué tan rápido se puede llegar desde un nodo a todos los demás.
+\end{itemize}
+Adicionalmente, se modeló la tolerancia a fallos simulando la eliminación de vértices críticos (estaciones inoperativas) para observar si el número de componentes conexas del grafo se incrementa, lo cual indicaría una fragmentación del sistema de transporte.
+
 \newpage
 \section{Desarrollo o implementación}
 
@@ -150,6 +159,9 @@ El núcleo operacional se compone de dos aproximaciones algorítmicas, encapsula
 
 El código se robusteció contemplando entradas donde el usuario provee grupos de nodos (por ejemplo, querer llegar a "Portal del Prado", que incluye sus módulos norte y sur). Se implementó un bucle que prueba combinaciones cartesianas de origen-destino y devuelve el óptimo global iterativo.
 
+\subsection{Módulo de Análisis Estructural}
+El archivo \texttt{graph\_analyzer.py} complementa el enrutamiento ejecutando un escaneo topológico. Utilizando las funciones integradas de la librería \texttt{NetworkX}, se calculan métricas globales (densidad, coeficiente de clustering, grado promedio) y se extraen los nodos críticos de la red basándose en su centralidad. Para evaluar la resiliencia del sistema, se implementó una rutina (\texttt{simular\_falla\_parada}) que retira un nodo del grafo en memoria y recalcula las componentes conexas, determinando de manera algorítmica si el cierre de una estación aísla por completo ciertos sectores de la ciudad.
+
 \newpage
 \section{Resultados y análisis}
 
@@ -163,6 +175,9 @@ Por su parte, el "Dijkstra de ahorro", al manejar una exploración multidimensio
 Las variaciones entre modos evidenciaron las dinámicas propias de Transmetro. En viajes transversales de extremo a extremo de la ciudad, el modo rápido comúnmente propone una secuencia de saltos usando alimentadores, rutas troncales y de nuevo alimentadores que geométricamente dibujan una línea recta. Si bien esto recorta la distancia de viaje en kilómetros, fácilmente supera la barrera de los 3 buses tomados, generando un cobro adicional.
 
 Al conmutar al modo ahorro, el algoritmo conscientemente realiza un desvío geográfico. Propone al usuario caminar unos metros de más o tomar una única ruta alimentadora que realiza un recorrido perimetral más amplio, sacrificando distancia (y eventualmente unos minutos extra de viaje calculados mediante un factor constante de 22 km/h), pero preservando los transbordos bajo el umbral máximo del primer pasaje ($1$ o $2$ transbordos), salvaguardando así la economía del pasajero. Estas decisiones orgánicas reafirman la consistencia de la función objetivo definida en nuestro modelamiento matemático.
+
+\subsection{Topología y Resiliencia de la Red}
+El análisis estructural arrojó que la red de Transmetro presenta una baja densidad global, una característica típica de las redes de transporte terrestre que operan estrictamente en corredores predefinidos. Los cálculos de centralidad revelaron que ciertas estaciones actúan como nodos críticos indiscutibles (reflejado en su alto \textit{Betweenness Centrality}); estas estaciones, que usualmente fungen como portales o puntos de trasbordo troncal-alimentador, concentran el flujo de múltiples rutas. Al utilizar la función de simulación de falla sobre estas paradas críticas, observamos que el grafo tiende a fragmentarse, aumentando su número de componentes conexas. Esto demuestra algorítmicamente la vulnerabilidad del sistema de transporte masivo ante bloqueos viales, contingencias operativas o cierres por mantenimiento en sus arterias principales.
 
 \newpage
 \section{Conclusiones}
